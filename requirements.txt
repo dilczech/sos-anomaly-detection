@@ -1,0 +1,6 @@
+pandas==3.0.3
+numpy==2.4.6
+matplotlib==3.10.9
+seaborn==0.13.2
+pyarrow==24.0.0
+fastparquet==2026.5.0
