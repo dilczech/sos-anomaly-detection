@@ -54,7 +54,7 @@ $daily\_ots(i, j, k) = Weight(i, k) \times count\_rows(i, j, k)$
 $daily\_ots_{log} = \ln(daily\_ots + 1)$
 
 Робастный показатель Modified Z-score рассчитывается на основе медианы и
-медианного абсолютного отклонения (MAD) в логарифмической шкале: $Score_i = 0.6745$ $\times$ $\frac{daily\_ots_{log, i}$ - $\text$${median}_{log}}{MAD_{log}}$
+медианного абсолютного отклонения (MAD) в логарифмической шкале: $$Score_i = 0.6745 \times \frac{daily\_ots_{\log, i} - \text{median}_{\log}}{MAD_{\log}}$$
 
 #### Преимущества логарифмирования:
 
