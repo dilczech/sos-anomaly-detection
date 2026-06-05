@@ -1,22 +1,16 @@
-# -*- coding: utf-8 -*-
-# 1. Принудительная установка бэкенда в переменные окружения на самой первой строчке!
 import os
 os.environ['MPLBACKEND'] = 'Agg'
-
 import sys
 import glob
 import unittest
 import pandas as pd
 import numpy as np
-
-# 2. Безопасный импорт matplotlib и активация неинтерактивного режима
 import matplotlib
 matplotlib.use('Agg')
 
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-# Настройка стилей для визуализации
 sns.set_theme(style="whitegrid")
 plt.rcParams['font.family'] = 'sans-serif'
 plt.rcParams['figure.figsize'] = (10, 6)
@@ -34,10 +28,8 @@ def load_data(input_path):
         else:
             raise ValueError(f"Неподдерживаемый формат файла: {input_path}")
             
-    # Если передан путь к папке, рекурсивно ищем parquet-файлы
     parquet_files = glob.glob(os.path.join(input_path, '**/*.parquet'), recursive=True)
     if not parquet_files:
-        # Попытка прочесть директорию напрямую через pandas
         try:
             return pd.read_parquet(input_path)
         except Exception as e:
@@ -56,21 +48,14 @@ def load_data(input_path):
     return pd.concat(dfs, ignore_index=True)
 
 def preprocess_data(df):
-    """
-    Переименовывает колонки, приводит типы к корректным.
-    Преобразует типы Decimal в float для быстрой векторной арифметики.
-    """
     df = df.copy()
     if 'CategoryNameDelivery' in df.columns:
         df = df.rename(columns={'CategoryNameDelivery': 'CategoryDelivery'})
-    
-    # Приводим типы данных
     if 'researchdate' in df.columns:
         df['researchdate'] = pd.to_datetime(df['researchdate']).dt.date
     if 'Start' in df.columns:
         df['Start'] = pd.to_datetime(df['Start'])
         
-    # Преобразуем Decimal-колонки в стандартный float для корректной работы математических операций
     for col in ['Weight', 'week_weight', 'month_weight']:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
@@ -78,53 +63,34 @@ def preprocess_data(df):
     return df
 
 def add_stats(df, group_cols, suffix):
-    """
-    Рассчитывает медиану и MAD на определенном уровне агрегации 
-    с применением логарифмического сглаживания и MAD-smoothing (Улучшения Б и В).
-    """
     stats = df.groupby(group_cols).agg(
         n_uniq=('SubjectID', 'nunique'),
         median=('daily_ots_log', 'median')
     ).reset_index()
-    
     df_temp = df.merge(stats, on=group_cols, how='left')
     df_temp['ad'] = (df_temp['daily_ots_log'] - df_temp['median']).abs()
-    
     mad = df_temp.groupby(group_cols).agg(
         mad=('ad', 'median')
-    ).reset_index()
-    
+    ).reset_index()    
     stats = stats.merge(mad, on=group_cols, how='left')
-    
-    # Улучшение Б (MAD Smoothing): исключаем равенство MAD нулю в однородных группах
     epsilon = 1e-4
     stats['mad'] = np.where(stats['mad'] == 0, epsilon * stats['median'].clip(lower=1.0), stats['mad'])
     stats['mad'] = stats['mad'].clip(lower=1e-5)
-    
-    # Переименовываем столбцы для объединения
     stats = stats.rename(columns={
         'n_uniq': f'n_uniq_{suffix}',
         'median': f'median_{suffix}',
         'mad': f'mad_{suffix}'
     })
     return df.merge(stats, on=group_cols, how='left')
-
 def detect_anomalies(df):
-    """
-    Основной алгоритм поиска аномалий на основе Modified Z-score с fallback-иерархией.
-    """
-    # Фильтруем строки по условиям BrandinDelivery == 1.0 и непустой CategoryDelivery
     df_filtered = df[
         (df['BrandinDelivery'] == 1.0) & 
         (df['CategoryDelivery'].notna()) & 
         (df['CategoryDelivery'] != '')
     ].copy()
-    
     if df_filtered.empty:
         print("Предупреждение: нет подходящих строк для анализа (BrandinDelivery == 1.0 и заполненная категория).")
         return pd.DataFrame(), pd.DataFrame()
-        
-    # Считаем count_rows и daily_ots
     group_cols = ['SubjectID', 'researchdate', 'CategoryDelivery', 'BrandID']
     df_agg = df_filtered.groupby(group_cols).agg(
         count_rows=('SubjectID', 'count'),
@@ -133,45 +99,28 @@ def detect_anomalies(df):
     ).reset_index()
     
     df_agg['daily_ots'] = df_agg['Weight'] * df_agg['count_rows']
-    
-    # Улучшение В (Логарифмирование): Сглаживание правосторонней асимметрии данных
     df_agg['daily_ots_log'] = np.log1p(df_agg['daily_ots'])
-    
-    # Расчет статистик на 3 уровнях иерархии
-    # Уровень 1: День + Категория + Бренд
     df_agg = add_stats(df_agg, ['researchdate', 'CategoryDelivery', 'BrandID'], 'lvl1')
-    # Уровень 2: День + Категория
     df_agg = add_stats(df_agg, ['researchdate', 'CategoryDelivery'], 'lvl2')
-    # Уровень 3: День
     df_agg = add_stats(df_agg, ['researchdate'], 'lvl3')
-    
-    # Условия выбора уровня для расчета score (fallback при малых выборках)
     cond_lvl1 = (df_agg['n_uniq_lvl1'] >= 5) & (df_agg['mad_lvl1'] > 0)
     cond_lvl2 = (~cond_lvl1) & (df_agg['n_uniq_lvl2'] >= 5) & (df_agg['mad_lvl2'] > 0)
     cond_lvl3 = (~cond_lvl1) & (~cond_lvl2) & (df_agg['n_uniq_lvl3'] >= 5) & (df_agg['mad_lvl3'] > 0)
-    
-    # Рассчитываем Modified Z-score и порог для каждого уровня (в логарифмической шкале)
     score_lvl1 = 0.6745 * (df_agg['daily_ots_log'] - df_agg['median_lvl1']) / df_agg['mad_lvl1']
     thresh_lvl1_log = df_agg['median_lvl1'] + 3.5 * df_agg['mad_lvl1'] / 0.6745
-    
     score_lvl2 = 0.6745 * (df_agg['daily_ots_log'] - df_agg['median_lvl2']) / df_agg['mad_lvl2']
     thresh_lvl2_log = df_agg['median_lvl2'] + 3.5 * df_agg['mad_lvl2'] / 0.6745
-    
     score_lvl3 = 0.6745 * (df_agg['daily_ots_log'] - df_agg['median_lvl3']) / df_agg['mad_lvl3']
     thresh_lvl3_log = df_agg['median_lvl3'] + 3.5 * df_agg['mad_lvl3'] / 0.6745
-    
-    # Объединяем результаты по условиям
+
     df_agg['score'] = np.select([cond_lvl1, cond_lvl2, cond_lvl3], [score_lvl1, score_lvl2, score_lvl3], default=np.nan)
     df_agg['threshold_log'] = np.select([cond_lvl1, cond_lvl2, cond_lvl3], [thresh_lvl1_log, thresh_lvl2_log, thresh_lvl3_log], default=np.nan)
     
-    # Обратное преобразование порога в исходную шкалу OTS для интерпретируемости в отчетах
     df_agg['threshold'] = np.expm1(df_agg['threshold_log'])
     df_agg['level'] = np.select([cond_lvl1, cond_lvl2, cond_lvl3], ['Brand', 'Category', 'Date'], default='None')
     
-    # Флаг аномалии: score > 3.5
     df_agg['is_anomaly'] = (df_agg['score'] > 3.5) & (df_agg['level'] != 'None')
     
-    # Создаем детальные причины для аномалий
     anomalies = df_agg[df_agg['is_anomaly']].copy()
     if not anomalies.empty:
         def get_reason(row):
@@ -195,10 +144,8 @@ def build_plots(df, df_agg, anomalies, output_dir='output/plots'):
     """
     os.makedirs(output_dir, exist_ok=True)
     
-    # Набор пар респондент-дата для удаления
     anom_pairs = set(zip(anomalies['SubjectID'], anomalies['researchdate']))
     
-    # 1. total_ots_before_after.png
     df_agg['is_removed'] = df_agg.apply(lambda r: (r['SubjectID'], r['researchdate']) in anom_pairs, axis=1)
     
     ots_by_day_before = df_agg.groupby('researchdate')['daily_ots'].sum().sort_index()
@@ -217,7 +164,6 @@ def build_plots(df, df_agg, anomalies, output_dir='output/plots'):
     plt.savefig(os.path.join(output_dir, 'total_ots_before_after.png'), dpi=150)
     plt.close()
     
-    # 2. category_ots_change.png
     ots_cat_before = df_agg.groupby('CategoryDelivery')['daily_ots'].sum()
     ots_cat_after = df_agg[~df_agg['is_removed']].groupby('CategoryDelivery')['daily_ots'].sum()
     
@@ -233,7 +179,6 @@ def build_plots(df, df_agg, anomalies, output_dir='output/plots'):
     plt.savefig(os.path.join(output_dir, 'category_ots_change.png'), dpi=150)
     plt.close()
     
-    # 3. daily_anomaly_count.png
     anom_count_by_day = anomalies.groupby('researchdate')['SubjectID'].nunique().sort_index()
     all_dates = pd.date_range(start=df_agg['researchdate'].min(), end=df_agg['researchdate'].max()).date
     anom_count_by_day = anom_count_by_day.reindex(all_dates, fill_value=0)
@@ -250,9 +195,6 @@ def build_plots(df, df_agg, anomalies, output_dir='output/plots'):
     plt.close()
 
 def print_quality_metrics(df, df_agg, anomalies):
-    """
-    Вычисляет и выводит в консоль ключевые метрики качества очистки.
-    """
     total_reps = df['SubjectID'].nunique()
     anom_reps = anomalies['SubjectID'].nunique() if not anomalies.empty else 0
     share_anom_reps = anom_reps / total_reps if total_reps > 0 else 0
@@ -277,9 +219,7 @@ def print_quality_metrics(df, df_agg, anomalies):
 # --- ДОПОЛНИТЕЛЬНЫЕ АНАЛИТИЧЕСКИЕ ВОЗМОЖНОСТИ ---
 
 def plot_before_after_by_feature(df, anomalies, feature_name, title, output_file):
-    """
-    Строит график сравнения до/после для любой характеристики респондента или ресурса.
-    """
+
     anom_pairs = set(zip(anomalies['SubjectID'], anomalies['researchdate'])) if not anomalies.empty else set()
     df_clean = df[(df['BrandinDelivery'] == 1.0) & (df['CategoryDelivery'].notna())].copy()
     df_clean['is_removed'] = df_clean.apply(lambda r: (r['SubjectID'], r['researchdate']) in anom_pairs, axis=1)
@@ -300,16 +240,10 @@ def plot_before_after_by_feature(df, anomalies, feature_name, title, output_file
     plt.close()
 
 def get_query_text_table(df, subject_id, date):
-    """
-    Возвращает таблицу поисковых запросов для выбранного респондента и дня.
-    """
     subset = df[(df['SubjectID'] == subject_id) & (df['researchdate'] == date)]
     return subset[['SubjectID', 'researchdate', 'QueryText', 'Brand', 'CategoryDelivery', 'Weight']]
 
 def plot_brand_ots_chart(df, anomalies, brand_id, output_file):
-    """
-    Строит график изменения OTS по дням для выбранного бренда до и после очистки.
-    """
     anom_pairs = set(zip(anomalies['SubjectID'], anomalies['researchdate'])) if not anomalies.empty else set()
     df_brand = df[df['BrandID'] == brand_id].copy()
     df_brand['is_removed'] = df_brand.apply(lambda r: (r['SubjectID'], r['researchdate']) in anom_pairs, axis=1)
@@ -333,11 +267,7 @@ def plot_brand_ots_chart(df, anomalies, brand_id, output_file):
 # --- УЛУЧШЕНИЕ Г: МОДУЛЬНОЕ ТЕСТИРОВАНИЕ ---
 
 class TestAnomalyDetection(unittest.TestCase):
-    """
-    Класс для проведения автоматического модульного тестирования основных функций скрипта.
-    """
     def setUp(self):
-        # Создание небольшой контролируемой тестовой выборки
         self.test_df = pd.DataFrame({
             'SubjectID': [1, 2, 3, 4, 5, 6, 7],
             'QueryText': ['тест'] * 7,
@@ -357,14 +287,11 @@ class TestAnomalyDetection(unittest.TestCase):
     def test_anomaly_isolation(self):
         processed = preprocess_data(self.test_df)
         df_agg, anomalies = detect_anomalies(processed)
-        # Аномальный респондент 7 должен быть корректно изолирован
         self.assertIn(7, anomalies['SubjectID'].values)
-        # Стабильные респонденты 1-6 не должны помечаться как аномалии
         self.assertNotIn(1, anomalies['SubjectID'].values)
 
     def test_brand_delivery_filtering(self):
         df_filter_test = self.test_df.copy()
-        # Если респондент исключен из поставки (BrandinDelivery == 0), он не должен детектироваться
         df_filter_test.loc[df_filter_test['SubjectID'] == 7, 'BrandinDelivery'] = 0.0
         processed = preprocess_data(df_filter_test)
         df_agg, anomalies = detect_anomalies(processed)
@@ -373,7 +300,6 @@ class TestAnomalyDetection(unittest.TestCase):
 def main():
     if '--test' in sys.argv:
         print("Запуск модульного тестирования...")
-        # Убираем флаг из sys.argv для корректной работы unittest
         sys.argv.remove('--test')
         unittest.main()
         sys.exit(0)
@@ -381,7 +307,6 @@ def main():
     if len(sys.argv) > 1:
         input_path = sys.argv[1]
     else:
-        # Автоматический поиск папок в текущей директории
         month_folders = glob.glob('month=*')
         if month_folders:
             input_path = month_folders[0]
@@ -390,7 +315,6 @@ def main():
             
     print(f"Поиск данных в: {input_path}")
     
-    # 1. Загрузка данных
     try:
         df = load_data(input_path)
         print(f"Данные загружены. Строк: {len(df)}")
@@ -422,16 +346,12 @@ def main():
             'BrandinDelivery': np.random.choice([1.0, np.nan], n, p=[0.95, 0.05])
         })
     
-    # 2. Предобработка
     df = preprocess_data(df)
     
-    # 3. Поиск аномалий
     df_agg, anomalies = detect_anomalies(df)
     
-    # Создаем папку назначения
     os.makedirs('output', exist_ok=True)
     
-    # Сохраняем аномалии и причины
     anomalies_summary = anomalies[['SubjectID', 'researchdate']].drop_duplicates()
     anomalies_summary.to_csv('output/anomalies.csv', index=False)
     
@@ -443,11 +363,9 @@ def main():
         
     print("Результаты сохранены в папку 'output/'.")
     
-    # 4. Построение обязательных графиков
     build_plots(df, df_agg, anomalies)
     print("Диагностические графики сохранены в папку 'output/plots/'.")
     
-    # 5. Генерация аналитических разрезов (Пункт 8.2)
     print("Генерация аналитических разрезов...")
     plot_before_after_by_feature(df, anomalies, 'Пол', 'OTS до/после по полу респондента', 'output/plots/demo_gender.png')
     plot_before_after_by_feature(df, anomalies, 'Возраст', 'OTS до/после по возрастным группам', 'output/plots/demo_age.png')
@@ -457,7 +375,6 @@ def main():
         top_brand = df['BrandID'].value_counts().index[0]
         plot_brand_ots_chart(df, anomalies, top_brand, 'output/plots/brand_ots_change.png')
         
-    # Вывод метрик в консоль
     print_quality_metrics(df, df_agg, anomalies)
     
 if __name__ == '__main__':
