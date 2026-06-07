@@ -153,3 +153,9 @@ dates = pd.date_range(end=today, periods=30)
 ```
 
 2. Seaborn заменен на чистый Matplotlib
+
+Запуск 
+```bash
+git add solution_Федосеев_АА_ШАД_111_update.py
+```
+Время изменения **16:26, 07.06.26**
